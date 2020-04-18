@@ -1,10 +1,17 @@
 package mr
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 import "log"
 import "net/rpc"
 import "hash/fnv"
 
+type MRJob struct {
+	num  int
+	file string
+}
 
 //
 // Map functions return a slice of KeyValue.
@@ -24,7 +31,6 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
 //
 // main/mrworker.go calls this function.
 //
@@ -32,10 +38,55 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
+	mJobChan := make(chan MRJob)
+	rJobChan := make(chan MRJob)
+	ctx, _ := context.WithCancel(context.Background()) // used to manage the MR Job
+
+	go requestJob(ctx, mJobChan, rJobChan)
+
+	select {
+	case mJob := <-mJobChan:
+		doMap(mapf, mJob)
+	case rJob := <-rJobChan:
+		doReduce(reducef, rJob)
+	case <-ctx.Done():
+		return
+	}
 
 	// uncomment to send the Example RPC to the master.
-	// CallExample()
+	//CallExample()
+}
 
+func doMap(mapf func(string, string) []KeyValue,
+	mJob MRJob) {
+	// TODO: domap
+	// read file
+	// create kv structure
+	// Shuffle: use ihash func to get mr-X-Y
+	// request a new task
+}
+
+func doReduce(reducef func(string, []string) string,
+	rJob MRJob) {
+	// TODO: doReduce
+	// read file mr-*-Y (*: map , Y: reduce)
+	// reduce
+	// save into mr-out-X (X:reduce)
+	// request a new task
+}
+
+func requestJob(ctx context.Context, mJobChan chan MRJob, rJobChan chan MRJob) {
+	// TODO: requestJob
+	args := MRArgs{
+		Id:      0,
+		File:    "",
+		JobType: "",
+		Status:  "",
+	}
+
+	reply := MRReply{}
+
+	call("Master.JobDispatch", &args, &reply)
 }
 
 //

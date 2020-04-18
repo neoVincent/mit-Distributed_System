@@ -6,7 +6,9 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
+import (
+	"os"
+)
 import "strconv"
 
 //
@@ -23,7 +25,21 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
+type MRArgs struct {
+	MId     int
+	RId     int
+	File    string
+	JobType string
+	Status  string //FINISHED, END
+}
 
+type MRReply struct {
+	MId     int
+	RId     int
+	File    string
+	JobType string
+	Status  string //FINISHED, END
+}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the master.
