@@ -3,14 +3,17 @@ package mr
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
+	"os"
+	"path/filepath"
 )
 import "log"
 import "net/rpc"
 import "hash/fnv"
 
 type MRJob struct {
-	num  int
-	file string
+	JobNum   int
+	FileName string
 }
 
 //
@@ -21,6 +24,8 @@ type KeyValue struct {
 	Value string
 }
 
+// This is much like bucket sort
+// use hash function to has all the key to different buckets
 //
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
@@ -41,16 +46,36 @@ func Worker(mapf func(string, string) []KeyValue,
 	mJobChan := make(chan MRJob)
 	rJobChan := make(chan MRJob)
 	ctx, _ := context.WithCancel(context.Background()) // used to manage the MR Job
+	args := MRArgs{
+		Status: "INITIAL",
+	}
 
-	go requestJob(ctx, mJobChan, rJobChan)
+	go requestJob(ctx, args, mJobChan, rJobChan)
 
-	select {
-	case mJob := <-mJobChan:
-		doMap(mapf, mJob)
-	case rJob := <-rJobChan:
-		doReduce(reducef, rJob)
-	case <-ctx.Done():
-		return
+	for {
+		select {
+		case mJob := <-mJobChan:
+			err := doMap(mapf, mJob)
+			if err != nil {
+				args.Status = "FAILED"
+			} else {
+				args.Status = "FINISHED"
+			}
+			args.MId = mJob.JobNum
+			go requestJob(ctx, args, mJobChan, rJobChan)
+		case rJob := <-rJobChan:
+			err := doReduce(reducef, rJob)
+			if err != nil {
+				args.Status = "FAILED"
+			} else {
+				args.Status = "FINISHED"
+			}
+			args.RId = rJob.JobNum
+			go requestJob(ctx, args, mJobChan, rJobChan)
+		case <-ctx.Done():
+			log.Println("Worker is stopped")
+			return
+		}
 	}
 
 	// uncomment to send the Example RPC to the master.
@@ -58,35 +83,67 @@ func Worker(mapf func(string, string) []KeyValue,
 }
 
 func doMap(mapf func(string, string) []KeyValue,
-	mJob MRJob) {
-	// TODO: domap
+	mJob MRJob) error {
 	// read file
 	// create kv structure
+	log.Printf("Handle MAP job, job id: %v, file name: %v\n", mJob.JobNum, mJob.FileName)
+	file, err := os.Open(mJob.FileName)
+	if err != nil {
+		log.Fatalf("cannot open %v", mJob.FileName)
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", mJob.FileName)
+	}
+	file.Close()
+	kva := mapf(mJob.FileName, string(content))
 	// Shuffle: use ihash func to get mr-X-Y
-	// request a new task
+	// TODO: Store in jason format
+	for _, element := range kva {
+		rid := ihash(element.Key)
+		oname := fmt.Sprintf("mr-%v-%v", mJob.JobNum, rid)
+		ofile, err := os.OpenFile(oname, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			log.Println(err.Error())
+		}
+		fmt.Fprintf(ofile, "%v %v\n", element.Key, element.Value)
+		ofile.Close()
+	}
+	return nil
 }
 
 func doReduce(reducef func(string, []string) string,
-	rJob MRJob) {
-	// TODO: doReduce
+	rJob MRJob) error {
+	log.Printf("Handle REDUCE job, job id: %v", rJob.JobNum)
 	// read file mr-*-Y (*: map , Y: reduce)
-	// reduce
+	pattern := fmt.Sprintf("mr-*-%v", rJob.JobNum)
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		fmt.Println(err)
+	}
+	log.Println(matches)
+
+	// TODO: read as jason format. Key --> array, sends to reducef
+
 	// save into mr-out-X (X:reduce)
 	// request a new task
+	return nil
 }
 
-func requestJob(ctx context.Context, mJobChan chan MRJob, rJobChan chan MRJob) {
-	// TODO: requestJob
-	args := MRArgs{
-		Id:      0,
-		File:    "",
-		JobType: "",
-		Status:  "",
+func requestJob(ctx context.Context, args MRArgs, mJobChan chan MRJob, rJobChan chan MRJob) {
+	reply := MRReply{}
+	call("Master.JobDispatch", &args, &reply)
+
+	if reply.Status == "DONE" || (reply.RId < 0 && reply.MId < 0) {
+		ctx.Done()
+		return
 	}
 
-	reply := MRReply{}
-
-	call("Master.JobDispatch", &args, &reply)
+	if reply.JobType == "MAP" {
+		mJobChan <- MRJob{FileName: reply.File, JobNum: reply.MId}
+	} else {
+		rJobChan <- MRJob{FileName: reply.File, JobNum: reply.RId}
+	}
 }
 
 //

@@ -35,41 +35,15 @@ func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
 	return nil
 }
 
-func (m *Master) JobDispatch(arg *MRArgs, reply *MRReply) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
+func (m *Master) JobDispatch(args *MRArgs, reply *MRReply) error {
 	// check the result of the last job
-	switch arg.Status {
-	case "FINISHED":
-		key := ""
-		if arg.JobType == "MAP" {
-			m.nMap--
-			key = "MAP" + strconv.Itoa(arg.MId)
-		} else {
-			m.nReduce--
-			key = "REDUCE" + strconv.Itoa(arg.RId)
-		}
-		cancel := m.jobContext[key]
-		cancel()
-		delete(m.jobContext, key)
-	case "FAILED":
-		key := ""
-		if arg.JobType == "MAP" {
-			key = "MAP" + strconv.Itoa(arg.MId)
-			m.mapJobChan <- arg.MId
-		} else {
-			key = "REDUCE" + strconv.Itoa(arg.RId)
-			m.reduceJobChan <- arg.RId
-		}
-		cancel := m.jobContext[key]
-		cancel()
-		delete(m.jobContext, key)
-	}
+	m.handleJobResult(args, reply)
 
 	// assign new job
 	select {
 	case num := <-m.mapJobChan:
+		m.mu.Lock()
+		defer m.mu.Unlock()
 		reply.JobType = "MAP"
 		reply.File = m.mapJobs[num]
 		reply.MId = num
@@ -80,11 +54,19 @@ func (m *Master) JobDispatch(arg *MRArgs, reply *MRReply) error {
 		go m.handleContextTimeout(ctx, "MAP", num)
 		return nil
 	case num := <-m.reduceJobChan:
-		// TODO: ADD REDUCE LOGIC
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		reply.MId = -1
+		reply.RId = num
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		key := "REDUCE" + strconv.Itoa(num)
-		m.jobContext[key] = cancel
-		go m.handleContextTimeout(ctx, "REDUCE", num)
+		if num >= 0 {
+			m.jobContext[key] = cancel
+			go m.handleContextTimeout(ctx, "REDUCE", num)
+		} else {
+			log.Print("Hey worker: all works done!")
+			reply.Status = "DONE"
+		}
 		return nil
 	}
 }
@@ -93,6 +75,7 @@ func (m *Master) handleContextTimeout(ctx context.Context, jobType string, jobId
 	select {
 	case <-ctx.Done():
 		if ctx.Err() != context.Canceled {
+			log.Printf("Oops: Timeout! %v job %v redo", jobType, jobId)
 			m.mu.Lock()
 			defer m.mu.Unlock()
 			if jobType == "MAP" {
@@ -102,6 +85,62 @@ func (m *Master) handleContextTimeout(ctx context.Context, jobType string, jobId
 			}
 		}
 	}
+}
+
+func (m *Master) handleJobResult(args *MRArgs, reply *MRReply) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	switch args.Status {
+	case "FINISHED":
+		key := ""
+		if args.JobType == "MAP" {
+			log.Print("%v job: %v is Finished", args.JobType, args.MId)
+			key = "MAP" + strconv.Itoa(args.MId)
+			m.nMap--
+			if m.nMap == 0 {
+				go func() {
+					log.Println("Hey worker: Map jobs are done, let's start to reduce!")
+					for i := 0; i < m.nReduce; i++ {
+						m.reduceJobChan <- i
+					}
+				}()
+			}
+		} else {
+			log.Print("%v job: %v is Finished", args.JobType, args.RId)
+			key = "REDUCE" + strconv.Itoa(args.RId)
+			m.nReduce--
+			if m.nReduce == 0 {
+				log.Println("Reduce jobs ar done!")
+				go func() {
+					log.Printf("LEN(jobContext): %v\n", len(m.jobContext))
+					for i := 0; i < len(m.jobContext); i++ {
+						m.reduceJobChan <- -1
+					}
+				}()
+			}
+		}
+		cancel := m.jobContext[key]
+		cancel()
+		delete(m.jobContext, key)
+	case "FAILED":
+		key := ""
+		if args.JobType == "MAP" {
+			key = "MAP" + strconv.Itoa(args.MId)
+			go func() {
+				m.mapJobChan <- args.MId
+			}()
+		} else {
+			key = "REDUCE" + strconv.Itoa(args.RId)
+			go func() {
+				m.reduceJobChan <- args.RId
+			}()
+		}
+		cancel := m.jobContext[key]
+		cancel()
+		delete(m.jobContext, key)
+	}
+	return nil
 }
 
 //
@@ -130,7 +169,7 @@ func (m *Master) Done() bool {
 	// Your code here.
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	ret = m.nMap == 0 && m.nReduce == 0
+	ret = m.nMap == -1 && m.nReduce == -1
 	return ret
 }
 
@@ -140,7 +179,15 @@ func (m *Master) Done() bool {
 // nReduce is the number of reduce tasks to use.
 //
 func MakeMaster(files []string, nReduce int) *Master {
-	m := Master{}
+	m := Master{
+		mu:            sync.Mutex{},
+		nReduce:       nReduce,
+		nMap:          len(files),
+		mapJobs:       make(map[int]string),
+		mapJobChan:    make(chan int),
+		reduceJobChan: make(chan int),
+		jobContext:    make(map[string]context.CancelFunc),
+	}
 
 	// Your code here.
 	// initial the master
