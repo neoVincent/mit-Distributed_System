@@ -2,6 +2,7 @@ package mr
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -85,7 +86,7 @@ func Worker(mapf func(string, string) []KeyValue,
 func doMap(mapf func(string, string) []KeyValue,
 	mJob MRJob) error {
 	// read file
-	// create kv structure
+	// create kv structure by mapf
 	log.Printf("Handle MAP job, job id: %v, file name: %v\n", mJob.JobNum, mJob.FileName)
 	file, err := os.Open(mJob.FileName)
 	if err != nil {
@@ -97,8 +98,8 @@ func doMap(mapf func(string, string) []KeyValue,
 	}
 	file.Close()
 	kva := mapf(mJob.FileName, string(content))
+
 	// Shuffle: use ihash func to get mr-X-Y
-	// TODO: Store in jason format
 	for _, element := range kva {
 		rid := ihash(element.Key)
 		oname := fmt.Sprintf("mr-%v-%v", mJob.JobNum, rid)
@@ -106,9 +107,13 @@ func doMap(mapf func(string, string) []KeyValue,
 		if err != nil {
 			log.Println(err.Error())
 		}
-		fmt.Fprintf(ofile, "%v %v\n", element.Key, element.Value)
+		enc := json.NewEncoder(ofile)
+		if err := enc.Encode(element); err != nil {
+			log.Println(err.Error())
+		}
 		ofile.Close()
 	}
+
 	return nil
 }
 
@@ -121,12 +126,32 @@ func doReduce(reducef func(string, []string) string,
 	if err != nil {
 		fmt.Println(err)
 	}
-	log.Println(matches)
-
-	// TODO: read as jason format. Key --> array, sends to reducef
+	dat := make(map[string][]string)
+	for _, file := range matches {
+		ifile, err := os.OpenFile(file, os.O_RDONLY, 0644)
+		if err != nil {
+			log.Println(err.Error())
+		}
+		dec := json.NewDecoder(ifile)
+		// iterate the file
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			dat[kv.Key] = append(dat[kv.Key], kv.Value)
+		}
+	}
 
 	// save into mr-out-X (X:reduce)
-	// request a new task
+	ofileName := fmt.Sprintf("mr-out-%v", rJob.JobNum)
+	ofile, _ := os.Create(ofileName)
+	for key, val := range dat {
+		count := reducef(key, val)
+		fmt.Fprintf(ofile, "%v %v\n", key, count)
+	}
+
+	ofile.Close()
 	return nil
 }
 
