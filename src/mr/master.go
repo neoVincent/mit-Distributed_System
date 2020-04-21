@@ -191,7 +191,10 @@ func MakeMaster(files []string, nReduce int) *Master {
 
 	// Your code here.
 	// initial the master
-	// TODO: initialize the master
+	for index, file := range files {
+		m.mapJobChan <- index
+		m.mapJobs[index] = file
+	}
 
 	m.server()
 	return &m
