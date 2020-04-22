@@ -59,13 +59,13 @@ func (m *Master) JobDispatch(args *MRArgs, reply *MRReply) error {
 		log.Printf("JobDispatch: Reduce job num %v", num)
 		m.mu.Lock()
 		defer m.mu.Unlock()
+		reply.JobType = "REDUCE"
 		reply.MId = -1
 		reply.RId = num
 		reply.NReduce = m.nReduce
 		reply.NMap = m.nMap
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		key := "REDUCE" + strconv.Itoa(num)
-		log.Printf("REDUCE: Save ctx and cancel, key: %v", key)
 		if num >= 0 {
 			m.jobContext[key] = cancel
 			go m.handleContextTimeout(ctx, "REDUCE", num)
@@ -101,7 +101,7 @@ func (m *Master) handleJobResult(args *MRArgs, reply *MRReply) error {
 	case "FINISHED":
 		key := ""
 		if args.JobType == "MAP" {
-			log.Printf("%v job: %v is Finished", args.JobType, args.MId)
+			log.Printf("%v job: %v is Finished, current nMap: %v", args.JobType, args.MId, m.nMap)
 			key = "MAP" + strconv.Itoa(args.MId)
 			m.nMap--
 			if m.nMap == 0 {
@@ -113,14 +113,13 @@ func (m *Master) handleJobResult(args *MRArgs, reply *MRReply) error {
 				}()
 			}
 		} else {
-			log.Printf("%v job: %v is Finished", args.JobType, args.RId)
+			log.Printf("%v job: %v is Finished, current nReduce %v", args.JobType, args.RId, m.nReduce)
 			key = "REDUCE" + strconv.Itoa(args.RId)
 			m.nReduce--
 			if m.nReduce == 0 {
 				log.Println("Reduce jobs are done!")
 				go func() {
-					log.Printf("LEN(jobContext): %v\n", len(m.jobContext))
-					for i := 0; i < len(m.jobContext)+1; i++ {
+					for i := 0; i < 2; i++ {
 						m.reduceJobChan <- -1
 					}
 				}()
@@ -178,7 +177,8 @@ func (m *Master) Done() bool {
 	// Your code here.
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	ret = m.nMap == 0 && m.nReduce == 0
+	ret = m.nMap <= 0 && m.nReduce <= 0
+	log.Printf("DONE: nmap: %v nreduce %v", m.nMap, m.nReduce)
 	return ret
 }
 

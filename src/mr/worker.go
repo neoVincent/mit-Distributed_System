@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strings"
 )
 import "log"
 import "net/rpc"
@@ -66,6 +67,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			}
 			args.MId = mJob.JobNum
 			args.JobType = "MAP"
+			log.Printf("MAP: %v, request Job", args.Status)
 			go requestJob(cancel, args, mJobChan, rJobChan)
 		case rJob := <-rJobChan:
 			err := doReduce(reducef, rJob)
@@ -76,6 +78,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			}
 			args.RId = rJob.JobNum
 			args.JobType = "REDUCE"
+			log.Printf("REDUCE: %v, request Job", args.Status)
 			go requestJob(cancel, args, mJobChan, rJobChan)
 		case <-ctx.Done():
 			log.Println("Worker is stopped")
@@ -100,7 +103,9 @@ func doMap(mapf func(string, string) []KeyValue,
 	if err != nil {
 		log.Fatalf("cannot read %v", mJob.FileName)
 	}
-	file.Close()
+	if err := file.Close(); err != nil {
+		log.Fatal(err)
+	}
 	kva := mapf(mJob.FileName, string(content))
 
 	// Shuffle: use ihash func to get mr-X-Y
@@ -115,7 +120,10 @@ func doMap(mapf func(string, string) []KeyValue,
 		if err := enc.Encode(element); err != nil {
 			log.Println(err.Error())
 		}
-		ofile.Close()
+		if err := ofile.Close(); err != nil {
+			log.Fatal(err)
+		}
+
 	}
 
 	return nil
@@ -132,13 +140,17 @@ func doReduce(reducef func(string, []string) string,
 	}
 	dat := make(map[string][]string)
 	for _, file := range matches {
+		if strings.HasPrefix(file, "mr-out") {
+			continue
+		}
 		log.Printf("doReduce: Read file %v", file)
-		ifile, err := os.OpenFile(file, os.O_RDONLY, 0644)
+		ifile, err := os.OpenFile(file, os.O_RDWR|os.O_CREATE, 0755)
 		if err != nil {
 			log.Println(err.Error())
 		}
 		dec := json.NewDecoder(ifile)
 		// iterate the file
+		log.Printf("doReduce: Start to parse")
 		for {
 			var kv KeyValue
 			if err := dec.Decode(&kv); err != nil {
@@ -146,16 +158,24 @@ func doReduce(reducef func(string, []string) string,
 			}
 			dat[kv.Key] = append(dat[kv.Key], kv.Value)
 		}
+		log.Printf("doReduce: Finsih parse")
+		if err := ifile.Close(); err != nil {
+			log.Fatal(err)
+		}
 	}
 
 	// save into mr-out-X (X:reduce)
 	ofileName := fmt.Sprintf("mr-out-%v", rJob.JobNum)
 	ofile, _ := os.Create(ofileName)
+	log.Printf("len(data) %v", len(dat))
+	// TODO: for the multi reduce the loop becomes slow
 	for key, val := range dat {
 		count := reducef(key, val)
-		fmt.Fprintf(ofile, "%v %v\n", key, count)
+		if _, err := fmt.Fprintf(ofile, "%v %v\n", key, count); err != nil {
+			log.Printf("doReduce save file error: %v", err.Error())
+		}
 	}
-
+	log.Printf("Save to file %v", ofileName)
 	ofile.Close()
 	return nil
 }
@@ -163,6 +183,7 @@ func doReduce(reducef func(string, []string) string,
 func requestJob(cancel context.CancelFunc, args MRArgs, mJobChan chan MRJob, rJobChan chan MRJob) {
 	reply := MRReply{}
 	call("Master.JobDispatch", &args, &reply)
+	log.Printf("GET RESPONSE: Jobtype: %v Status: %v RID: %v MID %v", reply.JobType, reply.Status, reply.RId, reply.MId)
 
 	if reply.Status == "DONE" || (reply.RId < 0 && reply.MId < 0) {
 		log.Printf("All works are done!")
@@ -170,6 +191,7 @@ func requestJob(cancel context.CancelFunc, args MRArgs, mJobChan chan MRJob, rJo
 		return
 	}
 
+	// TODO: some cases the reply.JobType is empty in the test
 	if reply.JobType == "MAP" {
 		mJobChan <- MRJob{FileName: reply.File, JobNum: reply.MId, nMap: reply.NMap, nReduce: reply.NReduce}
 	} else {
