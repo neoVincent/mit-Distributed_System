@@ -38,33 +38,39 @@ func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
 func (m *Master) JobDispatch(args *MRArgs, reply *MRReply) error {
 	// check the result of the last job
 	m.handleJobResult(args, reply)
-
 	// assign new job
 	select {
 	case num := <-m.mapJobChan:
+		log.Printf("JobDispatch: Map job num %v", num)
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		reply.JobType = "MAP"
 		reply.File = m.mapJobs[num]
 		reply.MId = num
 		reply.RId = -1
+		reply.NReduce = m.nReduce
+		reply.NMap = m.nMap
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		key := "MAP" + strconv.Itoa(num)
 		m.jobContext[key] = cancel
 		go m.handleContextTimeout(ctx, "MAP", num)
 		return nil
 	case num := <-m.reduceJobChan:
+		log.Printf("JobDispatch: Reduce job num %v", num)
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		reply.MId = -1
 		reply.RId = num
+		reply.NReduce = m.nReduce
+		reply.NMap = m.nMap
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		key := "REDUCE" + strconv.Itoa(num)
+		log.Printf("REDUCE: Save ctx and cancel, key: %v", key)
 		if num >= 0 {
 			m.jobContext[key] = cancel
 			go m.handleContextTimeout(ctx, "REDUCE", num)
 		} else {
-			log.Print("Hey worker: all works done!")
+			log.Print("Hey worker: all works are done!")
 			reply.Status = "DONE"
 		}
 		return nil
@@ -95,7 +101,7 @@ func (m *Master) handleJobResult(args *MRArgs, reply *MRReply) error {
 	case "FINISHED":
 		key := ""
 		if args.JobType == "MAP" {
-			log.Print("%v job: %v is Finished", args.JobType, args.MId)
+			log.Printf("%v job: %v is Finished", args.JobType, args.MId)
 			key = "MAP" + strconv.Itoa(args.MId)
 			m.nMap--
 			if m.nMap == 0 {
@@ -107,23 +113,25 @@ func (m *Master) handleJobResult(args *MRArgs, reply *MRReply) error {
 				}()
 			}
 		} else {
-			log.Print("%v job: %v is Finished", args.JobType, args.RId)
+			log.Printf("%v job: %v is Finished", args.JobType, args.RId)
 			key = "REDUCE" + strconv.Itoa(args.RId)
 			m.nReduce--
 			if m.nReduce == 0 {
-				log.Println("Reduce jobs ar done!")
+				log.Println("Reduce jobs are done!")
 				go func() {
 					log.Printf("LEN(jobContext): %v\n", len(m.jobContext))
-					for i := 0; i < len(m.jobContext); i++ {
+					for i := 0; i < len(m.jobContext)+1; i++ {
 						m.reduceJobChan <- -1
 					}
 				}()
 			}
 		}
-		cancel := m.jobContext[key]
-		cancel()
-		delete(m.jobContext, key)
+		if cancel, ok := m.jobContext[key]; ok {
+			cancel()
+			delete(m.jobContext, key)
+		}
 	case "FAILED":
+		log.Printf("%v job: %v is FAILED", args.JobType, args.MId)
 		key := ""
 		if args.JobType == "MAP" {
 			key = "MAP" + strconv.Itoa(args.MId)
@@ -136,9 +144,10 @@ func (m *Master) handleJobResult(args *MRArgs, reply *MRReply) error {
 				m.reduceJobChan <- args.RId
 			}()
 		}
-		cancel := m.jobContext[key]
-		cancel()
-		delete(m.jobContext, key)
+		if cancel, ok := m.jobContext[key]; ok {
+			cancel()
+			delete(m.jobContext, key)
+		}
 	}
 	return nil
 }
@@ -169,7 +178,7 @@ func (m *Master) Done() bool {
 	// Your code here.
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	ret = m.nMap == -1 && m.nReduce == -1
+	ret = m.nMap == 0 && m.nReduce == 0
 	return ret
 }
 
@@ -184,8 +193,8 @@ func MakeMaster(files []string, nReduce int) *Master {
 		nReduce:       nReduce,
 		nMap:          len(files),
 		mapJobs:       make(map[int]string),
-		mapJobChan:    make(chan int),
-		reduceJobChan: make(chan int),
+		mapJobChan:    make(chan int, len(files)),
+		reduceJobChan: make(chan int, nReduce),
 		jobContext:    make(map[string]context.CancelFunc),
 	}
 
@@ -194,8 +203,10 @@ func MakeMaster(files []string, nReduce int) *Master {
 	for index, file := range files {
 		m.mapJobChan <- index
 		m.mapJobs[index] = file
+		log.Println(index, file)
 	}
 
+	log.Printf("nReduce %v, nMap: %v", m.nReduce, m.nMap)
 	m.server()
 	return &m
 }

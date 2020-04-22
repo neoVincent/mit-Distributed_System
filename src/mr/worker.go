@@ -15,6 +15,8 @@ import "hash/fnv"
 type MRJob struct {
 	JobNum   int
 	FileName string
+	nReduce  int
+	nMap     int
 }
 
 //
@@ -43,15 +45,15 @@ func ihash(key string) int {
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
-	// Your worker implementation here.
+	//Your worker implementation here.
 	mJobChan := make(chan MRJob)
 	rJobChan := make(chan MRJob)
-	ctx, _ := context.WithCancel(context.Background()) // used to manage the MR Job
+	ctx, cancel := context.WithCancel(context.Background()) // used to manage the MR Job
 	args := MRArgs{
 		Status: "INITIAL",
 	}
 
-	go requestJob(ctx, args, mJobChan, rJobChan)
+	go requestJob(cancel, args, mJobChan, rJobChan)
 
 	for {
 		select {
@@ -63,7 +65,8 @@ func Worker(mapf func(string, string) []KeyValue,
 				args.Status = "FINISHED"
 			}
 			args.MId = mJob.JobNum
-			go requestJob(ctx, args, mJobChan, rJobChan)
+			args.JobType = "MAP"
+			go requestJob(cancel, args, mJobChan, rJobChan)
 		case rJob := <-rJobChan:
 			err := doReduce(reducef, rJob)
 			if err != nil {
@@ -72,7 +75,8 @@ func Worker(mapf func(string, string) []KeyValue,
 				args.Status = "FINISHED"
 			}
 			args.RId = rJob.JobNum
-			go requestJob(ctx, args, mJobChan, rJobChan)
+			args.JobType = "REDUCE"
+			go requestJob(cancel, args, mJobChan, rJobChan)
 		case <-ctx.Done():
 			log.Println("Worker is stopped")
 			return
@@ -101,7 +105,7 @@ func doMap(mapf func(string, string) []KeyValue,
 
 	// Shuffle: use ihash func to get mr-X-Y
 	for _, element := range kva {
-		rid := ihash(element.Key)
+		rid := ihash(element.Key) % mJob.nReduce
 		oname := fmt.Sprintf("mr-%v-%v", mJob.JobNum, rid)
 		ofile, err := os.OpenFile(oname, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
@@ -128,6 +132,7 @@ func doReduce(reducef func(string, []string) string,
 	}
 	dat := make(map[string][]string)
 	for _, file := range matches {
+		log.Printf("doReduce: Read file %v", file)
 		ifile, err := os.OpenFile(file, os.O_RDONLY, 0644)
 		if err != nil {
 			log.Println(err.Error())
@@ -155,19 +160,20 @@ func doReduce(reducef func(string, []string) string,
 	return nil
 }
 
-func requestJob(ctx context.Context, args MRArgs, mJobChan chan MRJob, rJobChan chan MRJob) {
+func requestJob(cancel context.CancelFunc, args MRArgs, mJobChan chan MRJob, rJobChan chan MRJob) {
 	reply := MRReply{}
 	call("Master.JobDispatch", &args, &reply)
 
 	if reply.Status == "DONE" || (reply.RId < 0 && reply.MId < 0) {
-		ctx.Done()
+		log.Printf("All works are done!")
+		cancel()
 		return
 	}
 
 	if reply.JobType == "MAP" {
-		mJobChan <- MRJob{FileName: reply.File, JobNum: reply.MId}
+		mJobChan <- MRJob{FileName: reply.File, JobNum: reply.MId, nMap: reply.NMap, nReduce: reply.NReduce}
 	} else {
-		rJobChan <- MRJob{FileName: reply.File, JobNum: reply.RId}
+		rJobChan <- MRJob{FileName: reply.File, JobNum: reply.RId, nMap: reply.NMap, nReduce: reply.NReduce}
 	}
 }
 

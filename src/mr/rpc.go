@@ -38,7 +38,9 @@ type MRReply struct {
 	RId     int
 	File    string
 	JobType string
-	Status  string //FINISHED, END
+	Status  string
+	NReduce int
+	NMap    int
 }
 
 // Cook up a unique-ish UNIX-domain socket name
