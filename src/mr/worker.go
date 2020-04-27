@@ -66,8 +66,9 @@ func Worker(mapf func(string, string) []KeyValue,
 				args.Status = "FINISHED"
 			}
 			args.MId = mJob.JobNum
+			args.RId = -1
 			args.JobType = "MAP"
-			log.Printf("MAP: %v, request Job", args.Status)
+			log.Printf("MAP: %v, %v request Job", args.Status, args.MId)
 			go requestJob(cancel, args, mJobChan, rJobChan)
 		case rJob := <-rJobChan:
 			err := doReduce(reducef, rJob)
@@ -76,9 +77,10 @@ func Worker(mapf func(string, string) []KeyValue,
 			} else {
 				args.Status = "FINISHED"
 			}
+			args.MId = -1
 			args.RId = rJob.JobNum
 			args.JobType = "REDUCE"
-			log.Printf("REDUCE: %v, request Job", args.Status)
+			log.Printf("REDUCE: %v %v, request Job", args.Status, args.RId)
 			go requestJob(cancel, args, mJobChan, rJobChan)
 		case <-ctx.Done():
 			log.Println("Worker is stopped")
@@ -167,7 +169,7 @@ func doReduce(reducef func(string, []string) string,
 	// save into mr-out-X (X:reduce)
 	ofileName := fmt.Sprintf("mr-out-%v", rJob.JobNum)
 	ofile, _ := os.Create(ofileName)
-	log.Printf("len(data) %v", len(dat))
+	log.Printf("len(data) %v, file name %v", len(dat), ofileName)
 	// TODO: for the multi reduce the loop becomes slow
 	for key, val := range dat {
 		count := reducef(key, val)
@@ -187,15 +189,19 @@ func requestJob(cancel context.CancelFunc, args MRArgs, mJobChan chan MRJob, rJo
 
 	if reply.Status == "DONE" || (reply.RId < 0 && reply.MId < 0) {
 		log.Printf("All works are done!")
+		log.Printf("ARGS INFOR: jobtype %v status %v rid %v mid %v file %v", args.JobType, args.Status, args.RId, args.MId, args.File)
 		cancel()
 		return
 	}
 
-	// TODO: some cases the reply.JobType is empty in the test
 	if reply.JobType == "MAP" {
 		mJobChan <- MRJob{FileName: reply.File, JobNum: reply.MId, nMap: reply.NMap, nReduce: reply.NReduce}
-	} else {
+	} else if reply.JobType == "REDUCE" {
 		rJobChan <- MRJob{FileName: reply.File, JobNum: reply.RId, nMap: reply.NMap, nReduce: reply.NReduce}
+	} else {
+		log.Printf("REPLY: jobType is EMPTY, Assume Master is closed")
+		log.Printf("REQUEST INFOR: jobtype %v status %v rid %v mid %v file %v", args.JobType, args.Status, args.RId, args.MId, args.File)
+		cancel()
 	}
 }
 

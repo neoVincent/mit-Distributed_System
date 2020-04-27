@@ -94,11 +94,12 @@ func (m *Master) handleContextTimeout(ctx context.Context, jobType string, jobId
 }
 
 func (m *Master) handleJobResult(args *MRArgs, reply *MRReply) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	switch args.Status {
 	case "FINISHED":
+		m.mu.Lock()
+		defer m.mu.Unlock()
+
 		key := ""
 		if args.JobType == "MAP" {
 			log.Printf("%v job: %v is Finished, current nMap: %v", args.JobType, args.MId, m.nMap)
@@ -106,6 +107,9 @@ func (m *Master) handleJobResult(args *MRArgs, reply *MRReply) error {
 			m.nMap--
 			if m.nMap == 0 {
 				go func() {
+					m.mu.Lock()
+					defer m.mu.Unlock()
+
 					log.Println("Hey worker: Map jobs are done, let's start to reduce!")
 					for i := 0; i < m.nReduce; i++ {
 						m.reduceJobChan <- i
@@ -116,12 +120,17 @@ func (m *Master) handleJobResult(args *MRArgs, reply *MRReply) error {
 			log.Printf("%v job: %v is Finished, current nReduce %v", args.JobType, args.RId, m.nReduce)
 			key = "REDUCE" + strconv.Itoa(args.RId)
 			m.nReduce--
-			if m.nReduce == 0 {
+			if m.nReduce <= 0 {
 				log.Println("Reduce jobs are done!")
+				reply.Status = "DONE"
 				go func() {
-					for i := 0; i < 2; i++ {
+					m.mu.Lock()
+					defer m.mu.Unlock()
+
+					for i := 0; i < m.nReduce/2; i++ {
 						m.reduceJobChan <- -1
 					}
+
 				}()
 			}
 		}
@@ -130,6 +139,9 @@ func (m *Master) handleJobResult(args *MRArgs, reply *MRReply) error {
 			delete(m.jobContext, key)
 		}
 	case "FAILED":
+		m.mu.Lock()
+		defer m.mu.Unlock()
+
 		log.Printf("%v job: %v is FAILED", args.JobType, args.MId)
 		key := ""
 		if args.JobType == "MAP" {
@@ -146,6 +158,15 @@ func (m *Master) handleJobResult(args *MRArgs, reply *MRReply) error {
 		if cancel, ok := m.jobContext[key]; ok {
 			cancel()
 			delete(m.jobContext, key)
+		}
+	case "INITIAL":
+		m.mu.Lock()
+		defer m.mu.Unlock()
+
+		if m.nMap <= 0 && m.nReduce <= 0 {
+			go func() {
+				m.reduceJobChan <- -1 // all works are done!
+			}()
 		}
 	}
 	return nil
